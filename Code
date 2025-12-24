@@ -1,0 +1,174 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat LCD dan ukuran
+
+#define TRIG_TANGAN 3
+#define ECHO_TANGAN 4
+#define TRIG_SABUN 6
+#define ECHO_SABUN 7
+
+#define POMPA_PIN 5
+#define LED_HIJAU 2
+#define LED_MERAH 8
+
+unsigned long lastDispenseTime = 0;
+const unsigned long cooldownDuration = 5000;
+bool isCooldown = false;
+
+byte kosong[8] = {
+  B00000, B00000, B00000, B00000,
+  B00000, B00000, B00000, B00000
+};
+
+byte penuh[8] = {
+  B11111, B11111, B11111, B11111,
+  B11111, B11111, B11111, B11111
+};
+
+void setup() {
+  pinMode(TRIG_TANGAN, OUTPUT);
+  pinMode(ECHO_TANGAN, INPUT);
+  pinMode(TRIG_SABUN, OUTPUT);
+  pinMode(ECHO_SABUN, INPUT);
+  pinMode(POMPA_PIN, OUTPUT);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+
+  digitalWrite(POMPA_PIN, LOW);
+  digitalWrite(LED_HIJAU, LOW);
+  digitalWrite(LED_MERAH, LOW);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.createChar(0, kosong);
+  lcd.createChar(5, penuh);
+
+  Serial.begin(9600);
+}
+
+float bacaJarak(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  if (duration == 0) return -1;
+  return duration * 0.034 / 2;
+}
+
+float bacaJarakRata2(int trigPin, int echoPin, int jumlahSample = 5) {
+  float total = 0;
+  int validSample = 0;
+  for (int i = 0; i < jumlahSample; i++) {
+    float jarak = bacaJarak(trigPin, echoPin);
+    if (jarak > 0) {
+      total += jarak;
+      validSample++;
+    }
+    delay(50);
+  }
+  if (validSample == 0) return -1;
+  return total / validSample;
+}
+
+void tampilkanBarLevel(float persen) {
+  int blokTerisi = round(persen / 20);
+  lcd.setCursor(11, 0);
+  for (int i = 0; i < 5; i++) {
+    lcd.write(i < blokTerisi ? byte(5) : byte(0));
+  }
+}
+
+void loop() {
+  if (isCooldown && (millis() - lastDispenseTime >= cooldownDuration)) {
+    isCooldown = false;
+  }
+
+  if (isCooldown) return;
+
+  float jarakSabun = bacaJarakRata2(TRIG_SABUN, ECHO_SABUN);
+  float persentase = (jarakSabun > 0) ? (14.5 - jarakSabun) / (14.5 - 5.0) * 100.0 : 0;
+  persentase = constrain(persentase, 0, 100);
+
+  lcd.clear();
+
+  if (persentase <= 2) {
+    lcd.setCursor(0, 0);
+    lcd.print("Sabun habis!");
+    lcd.setCursor(0, 1);
+    lcd.print("Isi ulang Segera");
+    digitalWrite(LED_MERAH, HIGH);
+    digitalWrite(LED_HIJAU, LOW);
+    tampilkanBarLevel(persentase);
+    delay(500);
+    return;
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("Sabun: ");
+  lcd.print((int)persentase);
+  lcd.print("% ");
+  tampilkanBarLevel(persentase);
+  digitalWrite(LED_HIJAU, HIGH);
+  digitalWrite(LED_MERAH, LOW);
+
+  float jarakTangan = bacaJarakRata2(TRIG_TANGAN, ECHO_TANGAN);
+  Serial.print("Jarak tangan: ");
+  Serial.println(jarakTangan);
+
+  bool tanganTerlihat = (jarakTangan >= 3 && jarakTangan <= 10);  //
+  if (tanganTerlihat) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Tangan terdeteksi");
+    lcd.setCursor(0, 1);
+    lcd.print("Memberi sabun...");
+
+    digitalWrite(POMPA_PIN, HIGH);
+    unsigned long startTime = millis();
+    while (millis() - startTime < 10000) {
+      float cekTangan = bacaJarak(TRIG_TANGAN, ECHO_TANGAN);
+      if (cekTangan > 3 || cekTangan < 10) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Tangan hilang!");
+        lcd.setCursor(0, 1);
+        lcd.print("Batal kasih sabun");
+        digitalWrite(POMPA_PIN, LOW);
+        delay(2000);
+        return;
+      }
+      delay(100);
+    }
+
+    digitalWrite(POMPA_PIN, LOW);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Kasih sabun OK");
+    lcd.setCursor(0, 1);
+    lcd.print("Cek ulang level..");
+    delay(1000);
+
+    float jarakBaru = bacaJarakRata2(TRIG_SABUN, ECHO_SABUN);
+    float persenBaru = (jarakBaru > 0) ? (14.5 - jarakBaru) / (14.5 - 5.0) * 100.0 : 0;
+    persenBaru = constrain(persenBaru, 0, 100);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Sisa sabun: ");
+    lcd.print((int)persenBaru);
+    lcd.print("%");
+    lcd.setCursor(0, 1);
+    lcd.print("Terima kasih :)");
+    tampilkanBarLevel(persenBaru);
+
+    isCooldown = true;
+    lastDispenseTime = millis();
+    delay(3000);
+  }
+
+  delay(200);
+}
